@@ -22,8 +22,10 @@ Pods/
 .LSOverride
 ._*
 
-# Vendor (大型第三方库二进制/源码，不入仓库)
-Vendor/
+# Vendor 编译中间产物
+Vendor/OpenCVBuild/
+# xcframework 内的 header（可从源码重新生成，不入仓库）
+Vendor/OpenCV2/opencv2.xcframework/**/Headers/
 
 # Logs
 log/
