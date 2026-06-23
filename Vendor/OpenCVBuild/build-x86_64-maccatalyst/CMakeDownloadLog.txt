@@ -1,0 +1,5 @@
+#use_cache "/Users/bytedance/Workspace/hearth-stone/Vendor/OpenCVBuild/opencv-4.10.0/.cache"
+#do_unpack "v0.1.2d.zip" "dbb095a8bf3008e91edbbf45d8d34885" "https://github.com/opencv/ade/archive/v0.1.2d.zip" "/Users/bytedance/Workspace/hearth-stone/Vendor/OpenCVBuild/build-x86_64-maccatalyst/3rdparty/ade"
+#check_md5 "/Users/bytedance/Workspace/hearth-stone/Vendor/OpenCVBuild/opencv-4.10.0/.cache/ade/dbb095a8bf3008e91edbbf45d8d34885-v0.1.2d.zip"
+#mkdir "/Users/bytedance/Workspace/hearth-stone/Vendor/OpenCVBuild/build-x86_64-maccatalyst/3rdparty/ade"
+#unpack "/Users/bytedance/Workspace/hearth-stone/Vendor/OpenCVBuild/build-x86_64-maccatalyst/3rdparty/ade" "/Users/bytedance/Workspace/hearth-stone/Vendor/OpenCVBuild/opencv-4.10.0/.cache/ade/dbb095a8bf3008e91edbbf45d8d34885-v0.1.2d.zip"
