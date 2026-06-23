@@ -22,6 +22,9 @@ Pods/
 .LSOverride
 ._*
 
+# Vendor (大型第三方库二进制/源码，不入仓库)
+Vendor/
+
 # Logs
 log/
 *.log
