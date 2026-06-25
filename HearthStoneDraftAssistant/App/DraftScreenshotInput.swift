@@ -11,10 +11,70 @@ protocol DraftScreenshotRecognizing: Sendable {
     ) async throws -> DraftScreenshotRecognitionResult
 }
 
+// MARK: - iOS: Vision OCR only
+
+struct VisionOnlyDraftScreenshotRecognizer: DraftScreenshotRecognizing {
+    private let ocr = DraftTextRecognizer()
+
+    func recognizeCards(
+        from imageURL: URL,
+        candidates: [CardRecognitionCandidate]
+    ) async throws -> DraftScreenshotRecognitionResult {
+        var trace = RecognitionTrace()
+        trace.log("开始截图识别（Vision OCR）：\(imageURL.path)")
+        guard let image = UIImage(contentsOfFile: imageURL.path) else {
+            throw DraftScreenshotRecognitionError.unreadableImage
+        }
+        trace.log("候选卡数量：\(candidates.count)")
+        guard !candidates.isEmpty else {
+            return DraftScreenshotRecognitionResult(
+                imageURL: imageURL,
+                recognizedCardIds: [],
+                confidence: nil,
+                notes: ["当前确认职业下没有可用于识别的候选卡，请先刷新数据并确认职业。"] + trace.finishedRows()
+            )
+        }
+
+        let textResult = ocr.recognizeByText(from: image, imageURL: imageURL, candidates: candidates, trace: &trace)
+        if !textResult.acceptedCardIds.isEmpty {
+            let confidence = textResult.acceptedMatches.map(\.score).reduce(0, +) / Double(textResult.acceptedMatches.count)
+            let missingSlots = textResult.acceptedCardIdSlots.enumerated().compactMap { index, cardId in
+                cardId == nil ? "第 \(index + 1) 张" : nil
+            }
+            return DraftScreenshotRecognitionResult(
+                imageURL: imageURL,
+                recognizedCardIds: textResult.acceptedCardIds,
+                recognizedCardIdSlots: textResult.acceptedCardIdSlots,
+                confidence: confidence,
+                notes: [
+                    "识别方式：Apple Vision OCR + 卡名模糊匹配（iOS 模式）。",
+                    "截图布局：\(textResult.layout.name)。",
+                    "OCR 命中：\(textResult.acceptedCardIds.count)/3。",
+                    missingSlots.isEmpty ? "三张牌均已识别。" : "未识别槽位：\(missingSlots.joined(separator: "，"))。",
+                    "OCR 结果：\(textResult.acceptedMatches.map { "第 \($0.index + 1) 张「\($0.rawText)」→ \($0.candidate.displayName)（相似度 \(String(format: "%.1f", $0.score * 100))%）" }.joined(separator: "；"))"
+                ] + textResult.debugRows + trace.finishedRows()
+            )
+        }
+
+        return DraftScreenshotRecognitionResult(
+            imageURL: imageURL,
+            recognizedCardIds: [],
+            confidence: nil,
+            notes: [
+                "Vision OCR 未识别出任何卡牌名称。",
+                "请确保截图清晰且包含完整选牌界面，或手动填写卡牌名称。"
+            ] + textResult.debugRows + trace.finishedRows()
+        )
+    }
+}
+
+// MARK: - macCatalyst: OpenCV image matching + Vision OCR
+
+#if targetEnvironment(macCatalyst)
 struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
     private let imageCache = CardImageFeatureCache()
+    private let ocr = DraftTextRecognizer()
     private let reliableDistanceThreshold = 0.46
-    private let reliableTextThreshold = 0.72
 
     func recognizeCards(
         from imageURL: URL,
@@ -38,7 +98,7 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
             )
         }
 
-        let textResult = recognizeByText(from: image, imageURL: imageURL, candidates: candidates, trace: &trace)
+        let textResult = ocr.recognizeByText(from: image, imageURL: imageURL, candidates: candidates, trace: &trace)
         if textResult.acceptedCardIds.count == 3 {
             let confidence = textResult.acceptedMatches.map(\.score).reduce(0, +) / Double(textResult.acceptedMatches.count)
             return DraftScreenshotRecognitionResult(
@@ -76,7 +136,7 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
             )
         }
 
-        trace.log("OCR 未完整命中三张牌，进入 OpenCV 图像匹配兜底。OCR命中 \(textResult.acceptedCardIds.count)/3")
+        trace.log("OCR 未完整命中三张牌，进入 OpenCV 图像匹配兜底，OCR命中 \(textResult.acceptedCardIds.count)/3")
         let imageLoadStart = DispatchTime.now()
         let candidateImages = await imageCache.images(for: candidates)
         trace.logStage("加载候选卡图", since: imageLoadStart, detail: "成功 \(candidateImages.count)/\(candidates.count)")
@@ -93,7 +153,7 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
         }
 
         let imageMatchStart = DispatchTime.now()
-        let layoutMatches = screenshotLayouts().compactMap { layout -> LayoutMatch? in
+        let layoutMatches = ocr.screenshotLayouts().compactMap { layout -> LayoutMatch? in
             let layoutStart = DispatchTime.now()
             var cardImages: [UIImage] = []
             var screenImages: [UIImage] = []
@@ -200,38 +260,6 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
         )
     }
 
-    private func screenshotLayouts() -> [ScreenshotLayout] {
-        [
-            ScreenshotLayout(
-                name: "完整竞技场选牌界面",
-                cardRegions: cardRegions(centers: [0.282, 0.500, 0.718], width: 0.17, topY: 0.23, height: 0.46),
-                artworkRegion: CGRect(x: 0.30, y: 0.12, width: 0.42, height: 0.36),
-                nameRegions: titleCandidateRegions()
-            ),
-            ScreenshotLayout(
-                name: "三张卡牌近景截图",
-                cardRegions: cardRegions(centers: [0.18, 0.50, 0.82], width: 0.28, topY: 0.02, height: 0.96),
-                artworkRegion: CGRect(x: 0.27, y: 0.08, width: 0.44, height: 0.32),
-                nameRegions: titleCandidateRegions()
-            )
-        ]
-    }
-
-    private func titleCandidateRegions() -> [CGRect] {
-        [
-            CGRect(x: 0.00, y: 0.28, width: 1.00, height: 0.30),
-            CGRect(x: 0.02, y: 0.30, width: 0.96, height: 0.22),
-            CGRect(x: 0.06, y: 0.34, width: 0.88, height: 0.20),
-            CGRect(x: 0.10, y: 0.37, width: 0.80, height: 0.18)
-        ]
-    }
-
-    private func cardRegions(centers: [CGFloat], width: CGFloat, topY: CGFloat, height: CGFloat) -> [CGRect] {
-        centers.map { centerX in
-            CGRect(x: centerX - width / 2, y: topY, width: width, height: height)
-        }
-    }
-
     private func writeDebugArtifacts(
         imageURL: URL,
         originalImage: UIImage,
@@ -281,17 +309,221 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
         }.reduce(into: "") { $0.append($1) }
     }
 
-    private func recognizeByText(
+}
+#endif
+
+// MARK: - Shared OCR recognizer (all platforms)
+
+struct DraftTextRecognizer {
+    private let reliableTextThreshold = 0.80
+
+    fileprivate func screenshotLayouts() -> [ScreenshotLayout] {
+        [
+            ScreenshotLayout(
+                name: "完整竞技场选牌界面",
+                cardRegions: cardRegions(centers: [0.282, 0.500, 0.718], width: 0.17, topY: 0.23, height: 0.46),
+                artworkRegion: CGRect(x: 0.30, y: 0.12, width: 0.42, height: 0.36),
+                nameRegions: titleCandidateRegions()
+            ),
+            ScreenshotLayout(
+                name: "三张卡牌近景截图",
+                cardRegions: cardRegions(centers: [0.18, 0.50, 0.82], width: 0.28, topY: 0.02, height: 0.96),
+                artworkRegion: CGRect(x: 0.27, y: 0.08, width: 0.44, height: 0.32),
+                nameRegions: titleCandidateRegions()
+            )
+        ]
+    }
+
+    private func titleCandidateRegions() -> [CGRect] {
+        // 牌名横幅在卡片区域的 y 约 55%~80%，横向居中；多个候选区从宽到窄提高 OCR 命中率
+        [
+            CGRect(x: 0.05, y: 0.55, width: 0.90, height: 0.25),
+            CGRect(x: 0.08, y: 0.58, width: 0.84, height: 0.20),
+            CGRect(x: 0.12, y: 0.61, width: 0.76, height: 0.17),
+            CGRect(x: 0.15, y: 0.63, width: 0.70, height: 0.14)
+        ]
+    }
+
+    private func cardRegions(centers: [CGFloat], width: CGFloat, topY: CGFloat, height: CGFloat) -> [CGRect] {
+        centers.map { centerX in
+            CGRect(x: centerX - width / 2, y: topY, width: width, height: height)
+        }
+    }
+
+    // 用 VNDetectRectanglesRequest 在全图中找三张卡片的实际位置
+    // 返回归一化 CGRect 数组（Vision 坐标系：左下角为原点），已转换为 UIKit 坐标系（左上角为原点）
+    private func detectCardRects(in image: UIImage, trace: inout RecognitionTrace) -> [CGRect]? {
+        guard let cgImage = image.cgImage else { return nil }
+        let imgW = CGFloat(cgImage.width)
+        let imgH = CGFloat(cgImage.height)
+        guard imgW > 0, imgH > 0 else { return nil }
+
+        var detectedRects: [VNRectangleObservation] = []
+        let request = VNDetectRectanglesRequest { req, _ in
+            detectedRects = (req.results as? [VNRectangleObservation]) ?? []
+        }
+        request.minimumSize = 0.06          // 至少占图宽/高 6%
+        request.maximumObservations = 16    // 最多取 16 个候选
+        request.minimumConfidence = 0.4
+        request.quadratureTolerance = 25    // 允许一定程度的梯形
+
+        let handler = VNImageRequestHandler(
+            cgImage: cgImage,
+            orientation: image.cgImagePropertyOrientation,
+            options: [:]
+        )
+        guard (try? handler.perform([request])) != nil else { return nil }
+
+        // Vision 坐标系：y=0 在底部，转换为 UIKit（y=0 在顶部）
+        let uiRects = detectedRects.map { obs -> CGRect in
+            let b = obs.boundingBox
+            return CGRect(x: b.origin.x, y: 1 - b.origin.y - b.height, width: b.width, height: b.height)
+        }
+
+        // 筛选：高宽比 1.1~2.5（炉石卡片约 1.4），面积占全图 2%~35%
+        let cardAspectMin: CGFloat = 1.1
+        let cardAspectMax: CGFloat = 2.5
+        let minArea: CGFloat = 0.02
+        let maxArea: CGFloat = 0.35
+        let cardCandidates = uiRects.filter { r in
+            guard r.width > 0 else { return false }
+            let aspect = r.height / r.width
+            let area = r.width * r.height
+            return aspect >= cardAspectMin && aspect <= cardAspectMax && area >= minArea && area <= maxArea
+        }
+
+        guard cardCandidates.count >= 3 else {
+            trace.log("矩形检测：候选 \(cardCandidates.count) 个，不足3张，跳过自动布局")
+            return nil
+        }
+
+        // 按 X 中心排序，取三个面积最大且均匀分布的
+        let sorted = cardCandidates.sorted { $0.midX < $1.midX }
+
+        // 用滑动窗口找三个间距最均匀的
+        var bestTriple: (CGFloat, [CGRect]) = (.infinity, [])
+        for i in 0..<(sorted.count - 2) {
+            let triple = [sorted[i], sorted[i + 1], sorted[i + 2]]
+            // 检查三个的 X 中心是否近似等间距
+            let gaps = [triple[1].midX - triple[0].midX, triple[2].midX - triple[1].midX]
+            let gapVariance = abs(gaps[0] - gaps[1]) / max(gaps[0], gaps[1], 0.001)
+            // 检查三个的 Y 中心是否接近（同一行）
+            let ys = triple.map { $0.midY }
+            let ySpread = (ys.max()! - ys.min()!) / imgH * imgH  // 像素差
+            if gapVariance < bestTriple.0 && ySpread < 0.25 {
+                bestTriple = (gapVariance, triple)
+            }
+        }
+
+        guard bestTriple.0 < 0.5 else {
+            trace.log("矩形检测：找不到三个均匀分布的卡片矩形（最优方差 \(String(format: "%.2f", bestTriple.0))），跳过")
+            return nil
+        }
+
+        trace.log("矩形检测：成功定位三张卡片，方差 \(String(format: "%.2f", bestTriple.0))，区域 \(bestTriple.1.map { String(format: "(%.2f,%.2f,%.2fx%.2f)", $0.origin.x, $0.origin.y, $0.width, $0.height) }.joined(separator: " "))")
+        return bestTriple.1
+    }
+
+    // 把检测到的三个卡片 CGRect 转换为 ScreenshotLayout（nameRegions 相对于卡片区域）
+    private func layoutFromDetectedRects(_ rects: [CGRect]) -> ScreenshotLayout {
+        ScreenshotLayout(
+            name: "自动检测卡片位置",
+            cardRegions: rects,
+            artworkRegion: .zero,
+            nameRegions: titleCandidateRegions()
+        )
+    }
+
+    // 全图一次 OCR，按 X 坐标把文字分配到左/中/右三个槽，每槽取最佳匹配
+    // 返回 3 个元素（对应槽位），nil 表示该槽未识别
+    private func recognizeByFullImageOCR(
+        image: UIImage,
+        nameIndex: [CardNameIndexEntry],
+        trace: inout RecognitionTrace
+    ) -> [CardTextCandidateMatch?] {
+        let ocrStart = DispatchTime.now()
+        let allTexts = recognizeLocatedTextLines(in: image)
+        trace.logStage("全图OCR", since: ocrStart, detail: "读到 \(allTexts.count) 条文字")
+
+        guard !allTexts.isEmpty else { return [nil, nil, nil] }
+
+        // 找三张牌的 X 分界：把所有文字 midX 排序，用间距最大的两处做分割点
+        // 假设图像左边是第1张、中间第2张、右边第3张（约各占1/3）
+        // 用固定三等分作为分槽边界，比动态分割更稳定
+        let slotBoundaries: [ClosedRange<CGFloat>] = [0.0...0.38, 0.31...0.69, 0.62...1.0]
+        // 注意：左右槽有重叠区间，边界附近的文字会被两个槽都考虑，取最优
+
+        var slotMatches: [CardTextCandidateMatch?] = [nil, nil, nil]
+
+        for (slotIndex, xRange) in slotBoundaries.enumerated() {
+            // 只取该槽 X 范围内的文字
+            let slotTexts = allTexts.filter { xRange.contains($0.midX) }.map(\.text)
+            let unique = Array(NSOrderedSet(array: slotTexts)) as? [String] ?? slotTexts
+            guard !unique.isEmpty else { continue }
+
+            let candidates = bestTextMatches(rawTexts: unique, nameIndex: nameIndex, limit: 3)
+            // 全图OCR场景：当最优候选得分明显高于第二候选（或唯一候选）时，适当放宽门槛到0.60
+            // 因为全图OCR已经通过坐标槽位限制了范围，误匹配风险较低
+            let fullOCRThreshold: Double = (candidates.count == 1 || (candidates.count >= 2 && candidates[0].score - candidates[1].score >= 0.15)) ? 0.60 : reliableTextThreshold
+            if let best = candidates.first, best.score >= fullOCRThreshold || isReliableTextMatch(best) {
+                // 若多个槽都命中同一张牌，保留置信度更高的槽
+                if let existing = (0..<3).compactMap({ slotMatches[$0] }).first(where: { $0.candidate.cardId == best.candidate.cardId }) {
+                    if best.score > existing.score {
+                        // 清除旧槽，填入新槽
+                        for i in 0..<3 where slotMatches[i]?.candidate.cardId == best.candidate.cardId { slotMatches[i] = nil }
+                        slotMatches[slotIndex] = best
+                    }
+                } else {
+                    slotMatches[slotIndex] = best
+                }
+            }
+            let summary = candidates.prefix(3).map { "\($0.candidate.displayName) \(String(format: "%.0f", $0.score * 100))%" }.joined(separator: "；")
+            trace.log("全图OCR 槽\(slotIndex + 1) 文字：\(unique.joined(separator: "/"))；Top3：\(summary.isEmpty ? "无" : summary)")
+        }
+
+        return slotMatches
+    }
+
+    fileprivate func recognizeByText(
         from image: UIImage,
         imageURL: URL,
         candidates: [CardRecognitionCandidate],
         trace: inout RecognitionTrace
     ) -> TextLayoutMatch {
         let ocrChainStart = DispatchTime.now()
-        trace.log("进入 OCR 链路：布局 \(screenshotLayouts().count) 个，候选卡 \(candidates.count) 张")
+        trace.log("进入 OCR 链路：候选卡 \(candidates.count) 张")
         let indexStart = DispatchTime.now()
         let nameIndex = buildNameSearchIndex(candidates)
         trace.logStage("构建卡名索引", since: indexStart, detail: "名称 \(nameIndex.count)")
+
+        // 第一步：全图OCR + 三槽分配（不依赖任何固定坐标）
+        let fullOCRStart = DispatchTime.now()
+        let fullImageSlots = recognizeByFullImageOCR(image: image, nameIndex: nameIndex, trace: &trace)
+        let fullOCRHits = fullImageSlots.compactMap { $0 }.count
+        trace.logStage("全图OCR分槽", since: fullOCRStart, detail: "命中 \(fullOCRHits)/3")
+
+        if fullOCRHits == 3 {
+            // 全部识别成功，直接返回结果，不再做固定布局扫描
+            let acceptedMatches = fullImageSlots.enumerated().compactMap { index, match -> CardTextMatch? in
+                guard let m = match else { return nil }
+                return CardTextMatch(index: index, rawText: m.rawText, candidate: m.candidate, matchedName: m.matchedName, score: m.score)
+            }
+            let score = acceptedMatches.map(\.score).reduce(0, +) + Double(acceptedMatches.count)
+            var result = TextLayoutMatch(
+                layout: ScreenshotLayout(name: "全图OCR分槽", cardRegions: [], artworkRegion: .zero, nameRegions: []),
+                cardImages: [],
+                nameImages: [],
+                acceptedMatches: acceptedMatches,
+                debugRows: [],
+                rankingScore: score,
+                debugDirectory: nil
+            )
+            result.debugDirectory = writeTextDebugArtifacts(imageURL: imageURL, originalImage: image, textMatch: result, traceRows: trace.rows)
+            trace.log("全图OCR分槽完整命中3张，跳过固定布局扫描")
+            return result
+        }
+
+        // 第二步：固定布局扫描（兜底，用于部分命中或全图OCR失败的情况）
         var layoutResults: [TextLayoutMatch] = []
         for layout in screenshotLayouts() {
             let layoutStart = DispatchTime.now()
@@ -313,7 +545,9 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
                 let cropElapsed = RecognitionTrace.formatElapsed(since: cropStart)
 
                 let ocrStart = DispatchTime.now()
-                let rawTexts = Array(NSOrderedSet(array: recognizeTextLines(in: cardImage) + titleImages.flatMap { recognizeTextLines(in: $0) })) as? [String] ?? []
+                // 只扫卡片下半部分（牌名横幅所在区域），避免卡图上方文字干扰
+                let cardBottomHalf = (try? cardImage.cropped(normalizedCrop: CGRect(x: 0, y: 0.5, width: 1, height: 0.5))) ?? cardImage
+                let rawTexts = Array(NSOrderedSet(array: recognizeTextLines(in: cardBottomHalf) + titleImages.flatMap { recognizeTextLines(in: $0) })) as? [String] ?? []
                 let ocrElapsed = RecognitionTrace.formatElapsed(since: ocrStart)
                 let matchStart = DispatchTime.now()
                 let topMatches = bestTextMatches(rawTexts: rawTexts, nameIndex: nameIndex, limit: 3)
@@ -346,6 +580,23 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
             layoutResults.append(result)
             trace.logStage("OCR布局 \(layout.name)", since: layoutStart, detail: "命中 \(acceptedMatches.count)/3，评分 \(String(format: "%.3f", score))")
         }
+        // 把全图OCR的部分命中也作为候选（可能比固定布局命中的槽不同）
+        if fullOCRHits > 0 {
+            let fullAccepted = fullImageSlots.enumerated().compactMap { index, match -> CardTextMatch? in
+                guard let m = match else { return nil }
+                return CardTextMatch(index: index, rawText: m.rawText, candidate: m.candidate, matchedName: m.matchedName, score: m.score)
+            }
+            let fullScore = fullAccepted.map(\.score).reduce(0, +) + Double(fullAccepted.count)
+            layoutResults.append(TextLayoutMatch(
+                layout: ScreenshotLayout(name: "全图OCR分槽", cardRegions: [], artworkRegion: .zero, nameRegions: []),
+                cardImages: [], nameImages: [],
+                acceptedMatches: fullAccepted,
+                debugRows: [],
+                rankingScore: fullScore,
+                debugDirectory: nil
+            ))
+        }
+
         trace.logStage("OCR完整链路", since: ocrChainStart, detail: "布局结果 \(layoutResults.count)")
 
         var best = layoutResults.max { left, right in
@@ -366,32 +617,45 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
         return best
     }
 
-    private func recognizeTextLines(in image: UIImage) -> [String] {
-        guard let cgImage = image.cgImage else {
-            return []
-        }
+    // 带位置信息的 OCR 结果
+    private struct LocatedText {
+        let text: String
+        let midX: CGFloat  // 归一化坐标 [0,1]，UIKit 坐标系（左上角原点）
+        let midY: CGFloat
+    }
 
-        var recognized: [String] = []
-        let request = VNRecognizeTextRequest { request, _ in
-            guard let observations = request.results as? [VNRecognizedTextObservation] else {
-                return
+    // 对图像做 OCR，返回每行文字及其中心坐标（UIKit 坐标系，左上角为原点）
+    private func recognizeLocatedTextLines(in image: UIImage) -> [LocatedText] {
+        guard let cgImage = image.cgImage else { return [] }
+
+        var results: [LocatedText] = []
+        let request = VNRecognizeTextRequest { req, _ in
+            guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
+            for obs in observations {
+                // Vision 坐标系：y=0 在底部，转换为 UIKit：y = 1 - visionY
+                let midX = obs.boundingBox.midX
+                let midY = 1.0 - obs.boundingBox.midY
+                for candidate in obs.topCandidates(3) {
+                    let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    results.append(LocatedText(text: text, midX: midX, midY: midY))
+                }
             }
-            recognized = observations
-                .flatMap { $0.topCandidates(3) }
-                .map(\.string)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
         }
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
 
-        do {
-            try VNImageRequestHandler(cgImage: cgImage, orientation: image.cgImagePropertyOrientation, options: [:]).perform([request])
-        } catch {
-            return []
-        }
-        return Array(NSOrderedSet(array: recognized)) as? [String] ?? recognized
+        try? VNImageRequestHandler(
+            cgImage: cgImage,
+            orientation: image.cgImagePropertyOrientation,
+            options: [:]
+        ).perform([request])
+        return results
+    }
+
+    private func recognizeTextLines(in image: UIImage) -> [String] {
+        recognizeLocatedTextLines(in: image).map(\.text)
     }
 
     private func bestTextMatches(
@@ -486,9 +750,8 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
     }
 
     private func textSimilarity(_ lhs: String, _ rhs: String) -> Double {
-        if lhs == rhs {
-            return 1
-        }
+        if lhs == rhs { return 1 }
+
         if lhs.count >= 2, rhs.contains(lhs) {
             return min(0.96, Double(lhs.count) / Double(rhs.count) + 0.15)
         }
@@ -497,7 +760,23 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
         }
 
         let distance = levenshtein(lhs, rhs)
-        return max(0, 1 - Double(distance) / Double(max(lhs.count, rhs.count)))
+        let editScore = max(0, 1 - Double(distance) / Double(max(lhs.count, rhs.count)))
+
+        // 字符覆盖率：候选名字中有多少比例的字符出现在 OCR 文本里
+        // 中文 OCR 常见噪点是单个字被识别错，但大部分字还是对的
+        // 若覆盖率高但 edit 距离因少数噪点字拉低了得分，给额外加分
+        let nameChars = Set(rhs)  // rhs 是候选名（标准名），lhs 是 OCR 结果
+        let coveredCount = nameChars.filter { lhs.contains($0) }.count
+        let coverage = Double(coveredCount) / Double(max(nameChars.count, 1))
+        // 只有名字较短（≤6字）且覆盖率高时才加分，避免误匹配长名字
+        let coverageBonus: Double
+        if rhs.count <= 6, coverage >= 0.6 {
+            coverageBonus = coverage * 0.25
+        } else {
+            coverageBonus = 0
+        }
+
+        return min(0.95, max(editScore, editScore + coverageBonus))
     }
 
     private func normalizeOCRText(_ value: String) -> String {
@@ -568,14 +847,14 @@ struct OpenCVDraftScreenshotRecognizer: DraftScreenshotRecognizing {
     }
 }
 
-private struct ScreenshotLayout {
+fileprivate struct ScreenshotLayout {
     let name: String
     let cardRegions: [CGRect]
     let artworkRegion: CGRect
     let nameRegions: [CGRect]
 }
 
-private struct RecognitionTrace {
+fileprivate struct RecognitionTrace {
     private let startedAt = DispatchTime.now()
     private(set) var rows: [String] = []
 
@@ -610,7 +889,7 @@ private struct RecognitionTrace {
     }
 }
 
-private struct TextLayoutMatch {
+fileprivate struct TextLayoutMatch {
     let layout: ScreenshotLayout
     let cardImages: [UIImage]
     let nameImages: [UIImage]
@@ -642,7 +921,7 @@ private struct TextLayoutMatch {
     }
 }
 
-private struct CardTextMatch {
+fileprivate struct CardTextMatch {
     let index: Int
     let rawText: String
     let candidate: CardRecognitionCandidate
@@ -650,21 +929,21 @@ private struct CardTextMatch {
     let score: Double
 }
 
-private struct CardTextCandidateMatch {
+fileprivate struct CardTextCandidateMatch {
     let rawText: String
     let candidate: CardRecognitionCandidate
     let matchedName: String
     let score: Double
 }
 
-private struct CardNameIndexEntry {
+fileprivate struct CardNameIndexEntry {
     let candidate: CardRecognitionCandidate
     let name: String
     let normalizedName: String
     let characters: Set<Character>
 }
 
-private struct LayoutMatch {
+fileprivate struct LayoutMatch {
     let layout: ScreenshotLayout
     let cardImages: [UIImage]
     let artworkImages: [UIImage]
@@ -674,13 +953,13 @@ private struct LayoutMatch {
     let debugRows: [String]
 }
 
-private struct CardImageMatch {
+fileprivate struct CardImageMatch {
     let candidate: CardRecognitionCandidate
     let candidateArtworkImage: UIImage
     let distance: Double
 }
 
-private actor CardImageFeatureCache {
+fileprivate actor CardImageFeatureCache {
     fileprivate struct CandidateImage {
         let candidate: CardRecognitionCandidate
         let artworkImage: UIImage

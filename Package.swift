@@ -5,7 +5,8 @@ import PackageDescription
 let package = Package(
     name: "HearthStoneDraftAssistant",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v16)
     ],
     products: [
         .library(

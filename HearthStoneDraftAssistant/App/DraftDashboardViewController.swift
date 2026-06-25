@@ -1,3 +1,5 @@
+import Photos
+import PhotosUI
 import SDWebImage
 import SnapKit
 import UniformTypeIdentifiers
@@ -17,9 +19,13 @@ final class DraftDashboardViewController: UIViewController {
     }
 
     private let dataService = DraftDataService.live()
+    #if targetEnvironment(macCatalyst)
     private let logWatcher = HearthstoneLogWatcher()
     private let screenshotFolderWatcher = ScreenshotFolderWatcher()
     private let screenshotRecognizer: DraftScreenshotRecognizing = OpenCVDraftScreenshotRecognizer()
+    #else
+    private let screenshotRecognizer: DraftScreenshotRecognizing = VisionOnlyDraftScreenshotRecognizer()
+    #endif
     private let classOptions: [(arenaClass: ArenaClass, title: String)] = [
         (.mage, "法师"),
         (.hunter, "猎人"),
@@ -38,33 +44,41 @@ final class DraftDashboardViewController: UIViewController {
     private let refreshButton = UIButton(type: .system)
     private let compareButton = UIButton(type: .system)
     private let guideButton = UIButton(type: .system)
+    #if targetEnvironment(macCatalyst)
     private let logWatcherButton = UIButton(type: .system)
     private let screenshotButton = UIButton(type: .system)
     private let autoWatchButton = UIButton(type: .system)
+    #else
+    private let cameraButton = UIButton(type: .system)
+    private let albumButton = UIButton(type: .system)
+    #endif
     private let clearButton = UIButton(type: .system)
     private let toolbarContainer = UIView()
     private let logStatusBar = UIView()
     private let logStatusIcon = UILabel()
     private let logStatusLabel = UILabel()
-    private var classChipButtons: [UIButton] = []
+
     private var selectedClassIndexes: Set<Int> = [0]
     private var confirmedArenaClasses: [ArenaClass] = [.mage]
-    private let cardFields = [UITextField(), UITextField(), UITextField()]
+    private var cardInputTexts: [String] = ["", "", ""]
     private let recommendationPanel = UIView()
     private let recommendationTitleLabel = UILabel()
     private let recommendationReasonLabel = UILabel()
-    private var cardChoiceViews: [DraftCardChoiceView] = []
+
     private let resultView = UITextView()
 
-    // 监听路径配置 UI
+    #if targetEnvironment(macCatalyst)
+    // 监听路径配置 UI（Mac 专用）
     private let watchPathsPanel = UIView()
     private var watchPathRows: [UIView] = []
     private var folderPickerDelegate: FolderPickerDelegate?
-
     private var isWatchingLogs = false
     private var isAutoWatching = false
     private var draftWindowExpiresAt: Date?
     private var screenshotPickerDelegate: DraftScreenshotPickerDelegate?
+    #else
+    private var phPickerDelegate: IOSPhotoPickerDelegate?
+    #endif
 
     // MARK: - CollectionView 架构
 
@@ -101,17 +115,13 @@ final class DraftDashboardViewController: UIViewController {
 
         configureToolbar()
         configureLogStatusBar()
+        #if targetEnvironment(macCatalyst)
         configureWatchPathsPanel()
+        #endif
         configureClassChips()
         configureRecommendationPanel()
-        configureCardChoiceViews()
 
-        for (index, field) in cardFields.enumerated() {
-            field.borderStyle = .roundedRect
-            field.placeholder = "第 \(index + 1) 张牌：中文名 / 英文名 / 卡牌ID"
-            field.autocorrectionType = .no
-            field.autocapitalizationType = .none
-        }
+
 
         resultView.isEditable = false
         resultView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -122,6 +132,10 @@ final class DraftDashboardViewController: UIViewController {
     }
 
     private func configureToolbar() {
+        toolbarContainer.backgroundColor = .secondarySystemBackground
+        toolbarContainer.layer.cornerRadius = 14
+
+        #if targetEnvironment(macCatalyst)
         let items: [(button: UIButton, image: String, label: String, action: Selector)] = [
             (inspectButton,    "tray.and.arrow.down", "数据源", #selector(inspectDataSources)),
             (refreshButton,    "arrow.clockwise",     "刷新",   #selector(refreshData)),
@@ -132,14 +146,29 @@ final class DraftDashboardViewController: UIViewController {
             (autoWatchButton,  "camera.viewfinder",   "自动",   #selector(toggleAutoWatch)),
             (clearButton,      "xmark.circle",        "清空",   #selector(clearResults)),
         ]
+        configureToolbarMac(items: items, separatorIndex: 4)
+        #else
+        let items: [(button: UIButton, image: String, label: String, action: Selector)] = [
+            (inspectButton, "tray.and.arrow.down", "数据源", #selector(inspectDataSources)),
+            (refreshButton, "arrow.clockwise",     "刷新",   #selector(refreshData)),
+            (compareButton, "chart.bar.xaxis",     "对比",   #selector(compareScores)),
+            (guideButton,   "info.circle",         "说明",   #selector(showSourceGuide)),
+            (cameraButton,  "camera",              "拍照",   #selector(takePhoto)),
+            (albumButton,   "photo.on.rectangle",  "相册",   #selector(pickFromAlbum)),
+            (clearButton,   "xmark.circle",        "清空",   #selector(clearResults)),
+        ]
+        configureToolbariOS(items: items)
+        #endif
+    }
 
-        toolbarContainer.backgroundColor = .secondarySystemBackground
-        toolbarContainer.layer.cornerRadius = 14
-
-        // 纯 Auto Layout：把按钮（以及分隔条）横向等宽排列，不使用 StackView
+    // Mac：所有按钮等宽平铺，中间加分隔线
+    private func configureToolbarMac(
+        items: [(button: UIButton, image: String, label: String, action: Selector)],
+        separatorIndex: Int
+    ) {
         var arranged: [UIView] = []
         for (i, item) in items.enumerated() {
-            if i == 4 {
+            if i == separatorIndex {
                 let sep = UIView()
                 sep.backgroundColor = .separator
                 toolbarContainer.addSubview(sep)
@@ -151,50 +180,60 @@ final class DraftDashboardViewController: UIViewController {
                 arranged.append(sep)
             }
             let btn = item.button
-            var cfg = UIButton.Configuration.plain()
-            cfg.image = UIImage(systemName: item.image)
-            cfg.title = item.label
-            cfg.imagePlacement = .top
-            cfg.imagePadding = 3
-            cfg.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
-            cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attr in
-                var out = attr
-                out.font = UIFont.systemFont(ofSize: 10, weight: .medium)
-                return out
-            }
-            cfg.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-            btn.configuration = cfg
+            btn.configuration = makeToolbarButtonConfig(image: item.image, label: item.label)
             btn.addTarget(self, action: item.action, for: .touchUpInside)
             toolbarContainer.addSubview(btn)
-            btn.snp.makeConstraints { make in
-                make.top.bottom.equalToSuperview()
-            }
+            btn.snp.makeConstraints { make in make.top.bottom.equalToSuperview() }
             arranged.append(btn)
         }
-
-        // 横向链：第一个贴左，最后一个贴右，相邻相接；所有按钮等宽
-        let buttons = arranged.filter { $0 is UIButton }
+        let buttons = arranged.compactMap { $0 as? UIButton }
         var previous: UIView?
         for view in arranged {
             view.snp.makeConstraints { make in
-                if let previous {
-                    make.leading.equalTo(previous.snp.trailing)
-                } else {
-                    make.leading.equalToSuperview()
-                }
+                if let previous { make.leading.equalTo(previous.snp.trailing) }
+                else { make.leading.equalToSuperview() }
             }
             previous = view
         }
-        previous?.snp.makeConstraints { make in
-            make.trailing.equalToSuperview()
-        }
+        previous?.snp.makeConstraints { make in make.trailing.equalToSuperview() }
         if let first = buttons.first {
             for btn in buttons.dropFirst() {
-                btn.snp.makeConstraints { make in
-                    make.width.equalTo(first)
-                }
+                btn.snp.makeConstraints { make in make.width.equalTo(first) }
             }
         }
+    }
+
+    // iOS：所有按钮等宽平铺，用 UIStackView 铺满 toolbarContainer（无需滑动）
+    private func configureToolbariOS(
+        items: [(button: UIButton, image: String, label: String, action: Selector)]
+    ) {
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.distribution = .fillEqually
+        stack.alignment = .fill
+        toolbarContainer.addSubview(stack)
+        stack.snp.makeConstraints { make in make.edges.equalToSuperview() }
+
+        for item in items {
+            let btn = item.button
+            btn.configuration = makeToolbarButtonConfig(image: item.image, label: item.label)
+            btn.addTarget(self, action: item.action, for: .touchUpInside)
+            stack.addArrangedSubview(btn)
+        }
+    }
+
+    private func makeToolbarButtonConfig(image: String, label: String) -> UIButton.Configuration {
+        var cfg = UIButton.Configuration.plain()
+        cfg.image = UIImage(systemName: image)
+        cfg.title = label
+        cfg.imagePlacement = .top
+        cfg.imagePadding = 3
+        cfg.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
+        cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attr in
+            var out = attr; out.font = UIFont.systemFont(ofSize: 10, weight: .medium); return out
+        }
+        cfg.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        return cfg
     }
 
     private func setToolbarButtonStyle(
@@ -203,21 +242,8 @@ final class DraftDashboardViewController: UIViewController {
         label: String,
         activeColor: UIColor? = nil
     ) {
-        var cfg = UIButton.Configuration.plain()
-        cfg.image = UIImage(systemName: image)
-        cfg.title = label
-        cfg.imagePlacement = .top
-        cfg.imagePadding = 3
-        cfg.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12)
-        cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attr in
-            var out = attr
-            out.font = UIFont.systemFont(ofSize: 10, weight: .medium)
-            return out
-        }
-        cfg.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-        if let color = activeColor {
-            cfg.baseForegroundColor = color
-        }
+        var cfg = makeToolbarButtonConfig(image: image, label: label)
+        if let color = activeColor { cfg.baseForegroundColor = color }
         button.configuration = cfg
     }
 
@@ -249,6 +275,7 @@ final class DraftDashboardViewController: UIViewController {
         }
     }
 
+    #if targetEnvironment(macCatalyst)
     private func configureWatchPathsPanel() {
         // 监听路径面板在 CollectionView 架构下暂不展示，保留对象但不进入视图层级。
         watchPathsPanel.isHidden = true
@@ -361,6 +388,7 @@ final class DraftDashboardViewController: UIViewController {
             await MainActor.run { self.refreshWatchPathRows() }
         }
     }
+    #endif
 
     // MARK: - CollectionView 布局与数据源
 
@@ -370,9 +398,16 @@ final class DraftDashboardViewController: UIViewController {
         collectionView.backgroundColor = .systemBackground
         collectionView.keyboardDismissMode = .interactive
         collectionView.alwaysBounceVertical = true
+        #if !targetEnvironment(macCatalyst)
+        collectionView.contentInsetAdjustmentBehavior = .automatic
+        #endif
         view.addSubview(collectionView)
         collectionView.snp.makeConstraints { make in
+            #if targetEnvironment(macCatalyst)
             make.edges.equalTo(view.safeAreaLayoutGuide)
+            #else
+            make.edges.equalToSuperview()
+            #endif
         }
 
         registerCells()
@@ -396,12 +431,22 @@ final class DraftDashboardViewController: UIViewController {
 
     private func makeCompositionalLayout() -> UICollectionViewCompositionalLayout {
         UICollectionViewCompositionalLayout { [weak self] sectionIndex, _ in
-            guard let self, let section = Section(rawValue: sectionIndex) else {
+            guard let self else { return Self.fullWidthSection(height: .estimated(44)) }
+            // 从 dataSource 当前 snapshot 取实际 section（iOS 下 snapshot 里 section 比 Mac 少）
+            let sections = self.dataSource.snapshot().sectionIdentifiers
+            guard sectionIndex < sections.count else {
                 return Self.fullWidthSection(height: .estimated(44))
             }
+            let section = sections[sectionIndex]
             switch section {
             case .toolbar:
+                #if targetEnvironment(macCatalyst)
                 return Self.insetSection(Self.fullWidthSection(height: .absolute(52)))
+                #else
+                let s = Self.fullWidthSection(height: .absolute(60))
+                s.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 4, trailing: 12)
+                return s
+                #endif
             case .status:
                 return Self.insetSection(Self.fullWidthSection(height: .absolute(32)))
             case .chips:
@@ -443,39 +488,71 @@ final class DraftDashboardViewController: UIViewController {
 
     private func chipsSection() -> NSCollectionLayoutSection {
         let itemSize = NSCollectionLayoutSize(
-            widthDimension: .estimated(72),
+            widthDimension: .estimated(80),
             heightDimension: .absolute(34)
         )
         let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        #if targetEnvironment(macCatalyst)
+        // Mac：wrap 布局，chip 自动换行，不需要横向滚动
         let groupSize = NSCollectionLayoutSize(
-            widthDimension: .estimated(72),
+            widthDimension: .fractionalWidth(1.0),
+            heightDimension: .absolute(34)
+        )
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
+        group.interItemSpacing = .fixed(8)
+        let section = NSCollectionLayoutSection(group: group)
+        section.interGroupSpacing = 8
+        #else
+        // iOS：单行横向滚动
+        item.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 8)
+        let groupSize = NSCollectionLayoutSize(
+            widthDimension: .estimated(900),
             heightDimension: .absolute(34)
         )
         let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
         let section = NSCollectionLayoutSection(group: group)
-        section.interGroupSpacing = 8
         section.orthogonalScrollingBehavior = .continuous
+        #endif
         section.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
         return section
     }
 
     private func cardsSection() -> NSCollectionLayoutSection {
-        // absolute 高度保证三张卡严格等高
+        #if targetEnvironment(macCatalyst)
+        // Mac：三列并排
         let itemSize = NSCollectionLayoutSize(
             widthDimension: .fractionalWidth(1.0 / 3.0),
-            heightDimension: .absolute(540)
+            heightDimension: .absolute(680)
         )
         let item = NSCollectionLayoutItem(layoutSize: itemSize)
         item.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 5, bottom: 0, trailing: 5)
-
         let groupSize = NSCollectionLayoutSize(
             widthDimension: .fractionalWidth(1.0),
-            heightDimension: .absolute(540)
+            heightDimension: .absolute(680)
         )
         let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
         let section = NSCollectionLayoutSection(group: group)
         section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 11, bottom: 8, trailing: 11)
         return section
+        #else
+        // iOS：单卡全宽，分页横滑
+        let cardHeight: CGFloat = 620
+        let itemSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1.0),
+            heightDimension: .absolute(cardHeight)
+        )
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        let groupSize = NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(0.88),
+            heightDimension: .absolute(cardHeight)
+        )
+        let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
+        let section = NSCollectionLayoutSection(group: group)
+        section.orthogonalScrollingBehavior = .groupPaging
+        section.interGroupSpacing = 12
+        section.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 20, bottom: 16, trailing: 20)
+        return section
+        #endif
     }
 
     private func logSection() -> NSCollectionLayoutSection {
@@ -505,9 +582,11 @@ final class DraftDashboardViewController: UIViewController {
         dataSource = UICollectionViewDiffableDataSource<Section, ItemID>(
             collectionView: collectionView
         ) { [weak self] collectionView, indexPath, item in
-            guard let self, let section = Section(rawValue: indexPath.section) else {
-                return UICollectionViewCell()
-            }
+            guard let self else { return UICollectionViewCell() }
+            // 从 snapshot 取实际 section（iOS 下 section 少，rawValue 映射不可靠）
+            let sections = self.dataSource.snapshot().sectionIdentifiers
+            guard indexPath.section < sections.count else { return UICollectionViewCell() }
+            let section = sections[indexPath.section]
             switch section {
             case .toolbar:
                 let cell = collectionView.dequeueReusableCell(
@@ -525,13 +604,24 @@ final class DraftDashboardViewController: UIViewController {
                 let cell = collectionView.dequeueReusableCell(
                     withReuseIdentifier: ClassChipCell.reuseID, for: indexPath
                 ) as! ClassChipCell
-                cell.host(self.classChipButtons[indexPath.item])
+                let index = indexPath.item
+                cell.configure(
+                    title: self.classOptions[index].title,
+                    selected: self.selectedClassIndexes.contains(index)
+                ) { [weak self] in self?.tapClassChipAtIndex(index) }
                 return cell
             case .inputs:
                 let cell = collectionView.dequeueReusableCell(
                     withReuseIdentifier: InputFieldCell.reuseID, for: indexPath
                 ) as! InputFieldCell
-                cell.host(self.cardFields[indexPath.item])
+                let idx = indexPath.item
+                cell.configure(
+                    placeholder: "第 \(idx + 1) 张牌：中文名 / 英文名 / 卡牌ID",
+                    text: self.cardInputTexts[idx]
+                ) { [weak self] text in
+                    self?.cardInputTexts[idx] = text
+                    self?.cardFieldDidChange()
+                }
                 return cell
             case .recommend:
                 let cell = collectionView.dequeueReusableCell(
@@ -543,7 +633,10 @@ final class DraftDashboardViewController: UIViewController {
                 let cell = collectionView.dequeueReusableCell(
                     withReuseIdentifier: CardChoiceCell.reuseID, for: indexPath
                 ) as! CardChoiceCell
-                cell.host(self.cardChoiceViews[indexPath.item])
+                let idx = indexPath.item
+                if idx < self.currentCardDisplays.count {
+                    self.configureCardCell(cell, with: self.currentCardDisplays[idx])
+                }
                 return cell
             case .log:
                 let cell = collectionView.dequeueReusableCell(
@@ -579,14 +672,18 @@ final class DraftDashboardViewController: UIViewController {
         snapshot.appendSections([.toolbar])
         snapshot.appendItems([ItemID.toolbar], toSection: .toolbar)
 
+        #if targetEnvironment(macCatalyst)
         snapshot.appendSections([.status])
         snapshot.appendItems([ItemID.status], toSection: .status)
+        #endif
 
         snapshot.appendSections([.chips])
         snapshot.appendItems(classOptions.indices.map { ItemID.chip($0) }, toSection: .chips)
 
+        #if targetEnvironment(macCatalyst)
         snapshot.appendSections([.inputs])
-        snapshot.appendItems((0..<cardFields.count).map { ItemID.input($0) }, toSection: .inputs)
+        snapshot.appendItems((0..<cardInputTexts.count).map { ItemID.input($0) }, toSection: .inputs)
+        #endif
 
         snapshot.appendSections([.recommend])
         if showRecommendation {
@@ -595,14 +692,15 @@ final class DraftDashboardViewController: UIViewController {
 
         snapshot.appendSections([.cards])
         if !currentCardDisplays.isEmpty {
-            let count = min(currentCardDisplays.count, cardChoiceViews.count)
-            snapshot.appendItems((0..<count).map { ItemID.card($0) }, toSection: .cards)
+            snapshot.appendItems(currentCardDisplays.indices.map { ItemID.card($0) }, toSection: .cards)
         }
 
+        #if targetEnvironment(macCatalyst)
         snapshot.appendSections([.log])
         if isLogExpanded {
             snapshot.appendItems([ItemID.log], toSection: .log)
         }
+        #endif
 
         dataSource.apply(snapshot, animatingDifferences: animatingDifferences)
     }
@@ -653,26 +751,23 @@ final class DraftDashboardViewController: UIViewController {
         }
     }
 
-    private func configureCardChoiceViews() {
-        // 创建三张卡片视图，由 CardChoiceCell 在 CollectionView 中承载（固定 500pt 高度）。
-        cardChoiceViews = (0..<3).map { _ in
-            let card = DraftCardChoiceView()
-            card.onPreviewRequested = { [weak self] imageURL in
-                self?.presentCardPreview(imageURL: imageURL)
-            }
-            return card
-        }
+
+    private func setToolbarEnabled(_ enabled: Bool) {
+        inspectButton.isEnabled = enabled
+        refreshButton.isEnabled = enabled
+        compareButton.isEnabled = enabled
+        guideButton.isEnabled = enabled
+        clearButton.isEnabled = enabled
+        #if targetEnvironment(macCatalyst)
+        logWatcherButton.isEnabled = enabled
+        screenshotButton.isEnabled = enabled
+        autoWatchButton.isEnabled = enabled
+        #endif
     }
 
     private func bootstrapData() {
         updateStatusBar("正在加载本地缓存...", isActive: false)
-        inspectButton.isEnabled = false
-        refreshButton.isEnabled = false
-        compareButton.isEnabled = false
-        guideButton.isEnabled = false
-        logWatcherButton.isEnabled = false
-        screenshotButton.isEnabled = false
-        autoWatchButton.isEnabled = false
+        setToolbarEnabled(false)
 
         Task { [weak self] in
             guard let self else {
@@ -688,13 +783,7 @@ final class DraftDashboardViewController: UIViewController {
                 )
                 self.hideDraftPreview()
                 self.resultView.text = self.render(statuses)
-                self.inspectButton.isEnabled = true
-                self.refreshButton.isEnabled = true
-                self.compareButton.isEnabled = true
-                self.guideButton.isEnabled = true
-                self.logWatcherButton.isEnabled = true
-                self.screenshotButton.isEnabled = true
-                self.autoWatchButton.isEnabled = true
+                self.setToolbarEnabled(true)
             }
 
             await self.refreshInBackground(cacheWasReady: loadedFromCache)
@@ -727,13 +816,7 @@ final class DraftDashboardViewController: UIViewController {
 
     @objc private func inspectDataSources() {
         updateStatusBar("正在检查数据源...", isActive: false)
-        inspectButton.isEnabled = false
-        refreshButton.isEnabled = false
-        compareButton.isEnabled = false
-        guideButton.isEnabled = false
-        logWatcherButton.isEnabled = false
-        screenshotButton.isEnabled = false
-        autoWatchButton.isEnabled = false
+        setToolbarEnabled(false)
 
         Task { [weak self] in
             guard let self else {
@@ -745,26 +828,14 @@ final class DraftDashboardViewController: UIViewController {
                 self.updateStatusBar("已缓存 \(statuses.filter(\.isCached).count)/\(statuses.count) 个数据集", isActive: false)
                 self.hideDraftPreview()
                 self.resultView.text = self.render(statuses)
-                self.inspectButton.isEnabled = true
-                self.refreshButton.isEnabled = true
-                self.compareButton.isEnabled = true
-                self.guideButton.isEnabled = true
-                self.logWatcherButton.isEnabled = true
-                self.screenshotButton.isEnabled = true
-                self.autoWatchButton.isEnabled = true
+                self.setToolbarEnabled(true)
             }
         }
     }
 
     @objc private func refreshData() {
         updateStatusBar("正在刷新远程数据...", isActive: false)
-        inspectButton.isEnabled = false
-        refreshButton.isEnabled = false
-        compareButton.isEnabled = false
-        guideButton.isEnabled = false
-        logWatcherButton.isEnabled = false
-        screenshotButton.isEnabled = false
-        autoWatchButton.isEnabled = false
+        setToolbarEnabled(false)
 
         Task { [weak self] in
             guard let self else {
@@ -778,26 +849,14 @@ final class DraftDashboardViewController: UIViewController {
                     self.updateStatusBar("数据刷新完成", isActive: false)
                     self.hideDraftPreview()
                     self.resultView.text = "数据刷新完成。点击「对比」查看当前三张牌评分。\n\n" + self.render(statuses)
-                    self.inspectButton.isEnabled = true
-                    self.refreshButton.isEnabled = true
-                    self.compareButton.isEnabled = true
-                    self.guideButton.isEnabled = true
-                    self.logWatcherButton.isEnabled = true
-                    self.screenshotButton.isEnabled = true
-                self.autoWatchButton.isEnabled = true
+                    self.setToolbarEnabled(true)
                 }
             } catch {
                 await MainActor.run {
                     self.updateStatusBar("刷新失败", isActive: false)
                     self.hideDraftPreview()
                     self.resultView.text = String(describing: error)
-                    self.inspectButton.isEnabled = true
-                    self.refreshButton.isEnabled = true
-                    self.compareButton.isEnabled = true
-                    self.guideButton.isEnabled = true
-                    self.logWatcherButton.isEnabled = true
-                    self.screenshotButton.isEnabled = true
-                self.autoWatchButton.isEnabled = true
+                    self.setToolbarEnabled(true)
                 }
             }
         }
@@ -805,20 +864,14 @@ final class DraftDashboardViewController: UIViewController {
 
     @objc private func compareScores() {
         updateStatusBar("正在对比三张牌得分...", isActive: false)
-        inspectButton.isEnabled = false
-        refreshButton.isEnabled = false
-        compareButton.isEnabled = false
-        guideButton.isEnabled = false
-        logWatcherButton.isEnabled = false
-        screenshotButton.isEnabled = false
-        autoWatchButton.isEnabled = false
+        setToolbarEnabled(false)
 
         Task { [weak self] in
             guard let self else {
                 return
             }
 
-            let cardIds = cardFields.map { $0.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+            let cardIds = self.cardInputTexts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
             let arenaClasses = confirmedArenaClasses
             var evaluations: [DraftChoiceEvaluation] = []
@@ -832,13 +885,7 @@ final class DraftDashboardViewController: UIViewController {
             await MainActor.run {
                 self.updateStatusBar("对比完成", isActive: false)
                 self.applyRenderedDraftOutput(self.renderDraftOutput(evaluations))
-                self.inspectButton.isEnabled = true
-                self.refreshButton.isEnabled = true
-                self.compareButton.isEnabled = true
-                self.guideButton.isEnabled = true
-                self.logWatcherButton.isEnabled = true
-                self.screenshotButton.isEnabled = true
-                self.autoWatchButton.isEnabled = true
+                self.setToolbarEnabled(true)
             }
         }
     }
@@ -849,11 +896,24 @@ final class DraftDashboardViewController: UIViewController {
         resultView.text = renderSourceGuide()
     }
 
+    // 输入框内容变化时，若当前显示的卡片数量与非空输入框数量不符则清空展示
+    @objc private func cardFieldDidChange() {
+        let filledCount = cardInputTexts.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+        if filledCount < currentCardDisplays.count {
+            hideDraftPreview()
+        }
+    }
+
     @objc private func clearResults() {
         hideDraftPreview()
-        for field in cardFields {
-            field.text = ""
+        cardInputTexts = ["", "", ""]
+        #if targetEnvironment(macCatalyst)
+        var snap = dataSource.snapshot()
+        if snap.sectionIdentifiers.contains(.inputs) {
+            let inputItems = snap.itemIdentifiers(inSection: .inputs)
+            if !inputItems.isEmpty { snap.reconfigureItems(inputItems); dataSource.apply(snap, animatingDifferences: false) }
         }
+        #endif
         resultView.text = ""
         updateStatusBar("已清空", isActive: false)
         UIView.animate(withDuration: 0.18) {
@@ -865,8 +925,9 @@ final class DraftDashboardViewController: UIViewController {
         }
     }
 
-    // MARK: - 自动截图监听
+    // MARK: - 自动截图监听（Mac 专用）
 
+    #if targetEnvironment(macCatalyst)
     @objc private func toggleAutoWatch() {
         if isAutoWatching {
             Task { [weak self] in
@@ -945,13 +1006,14 @@ final class DraftDashboardViewController: UIViewController {
             }
         }
     }
+    #endif
 
     private func autoRunScores() {
         updateStatusBar("自动识别完成，正在评分...", isActive: true)
 
         Task { [weak self] in
             guard let self else { return }
-            let cardIds = cardFields.map { $0.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+            let cardIds = self.cardInputTexts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
             guard !cardIds.isEmpty else { return }
             let arenaClasses = confirmedArenaClasses
@@ -967,6 +1029,7 @@ final class DraftDashboardViewController: UIViewController {
         }
     }
 
+    #if targetEnvironment(macCatalyst)
     @objc private func toggleLogWatcher() {
         if isWatchingLogs {
             Task { [weak self] in
@@ -1042,6 +1105,64 @@ final class DraftDashboardViewController: UIViewController {
         picker.allowsMultipleSelection = false
         present(picker, animated: true)
     }
+    #endif
+
+    // MARK: - iOS: 拍照 / 相册
+
+    #if !targetEnvironment(macCatalyst)
+    @objc private func takePhoto() {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            updateStatusBar("此设备不支持相机", isActive: false)
+            return
+        }
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = self
+        present(picker, animated: true)
+    }
+
+    @objc private func pickFromAlbum() {
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: config)
+        let delegate = IOSPhotoPickerDelegate { [weak self] image in
+            self?.recognizeImage(image)
+        } onCancel: { [weak self] in
+            self?.updateStatusBar("已取消选图", isActive: false)
+        }
+        phPickerDelegate = delegate
+        picker.delegate = delegate
+        present(picker, animated: true)
+    }
+
+    private func recognizeImage(_ image: UIImage) {
+        updateStatusBar("正在分析图片...", isActive: false)
+        hideDraftPreview()
+        resultView.text = "正在识别图片中的卡牌..."
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let tmpURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("jpg")
+                guard let data = image.jpegData(compressionQuality: 0.92) else {
+                    throw DraftScreenshotRecognitionError.unreadableImage
+                }
+                try data.write(to: tmpURL)
+                defer { try? FileManager.default.removeItem(at: tmpURL) }
+                let candidates = await dataService.repository.recognitionCandidates(for: confirmedArenaClasses)
+                let result = try await screenshotRecognizer.recognizeCards(from: tmpURL, candidates: candidates)
+                await MainActor.run { self.applyScreenshotRecognition(result) }
+            } catch {
+                await MainActor.run {
+                    self.updateStatusBar("图片识别失败", isActive: false)
+                    self.resultView.text = "图片识别失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    #endif
 
     private func recognizeScreenshot(at url: URL) {
         updateStatusBar("正在分析截图...", isActive: false)
@@ -1073,13 +1194,21 @@ final class DraftDashboardViewController: UIViewController {
 
         if result.recognizedCardIdSlots.isEmpty {
             for (index, cardId) in result.recognizedCardIds.prefix(3).enumerated() {
-                cardFields[index].text = cardId
+                cardInputTexts[index] = cardId
             }
         } else {
             for (index, cardId) in result.recognizedCardIdSlots.prefix(3).enumerated() {
-                cardFields[index].text = cardId ?? ""
+                cardInputTexts[index] = cardId ?? ""
             }
         }
+
+        #if targetEnvironment(macCatalyst)
+        var snap = dataSource.snapshot()
+        if snap.sectionIdentifiers.contains(.inputs) {
+            let inputItems = snap.itemIdentifiers(inSection: .inputs)
+            if !inputItems.isEmpty { snap.reconfigureItems(inputItems); dataSource.apply(snap, animatingDifferences: false) }
+        }
+        #endif
 
         guard recognizedSlotCount > 0 else {
             updateStatusBar("截图未识别出卡牌", isActive: false)
@@ -1091,18 +1220,11 @@ final class DraftDashboardViewController: UIViewController {
     }
 
     private func configureClassChips() {
-        // 职业 chip 由 CollectionView 的 chips section（横向滚动）承载，每个 chip 是一个 item。
-        for (index, _) in classOptions.enumerated() {
-            let btn = UIButton(type: .system)
-            btn.tag = index
-            btn.addTarget(self, action: #selector(tapClassChip(_:)), for: .touchUpInside)
-            classChipButtons.append(btn)
-        }
-        updateClassChipStyles()
+        // chip 样式由 ClassChipCell.configure() 在 dequeue 时设置，不需要预先创建 button
     }
 
-    @objc private func tapClassChip(_ sender: UIButton) {
-        let index = sender.tag
+    // cell 内部回调，index 已经确定
+    private func tapClassChipAtIndex(_ index: Int) {
         if selectedClassIndexes.contains(index) {
             guard selectedClassIndexes.count > 1 else { return }
             selectedClassIndexes.remove(index)
@@ -1120,21 +1242,17 @@ final class DraftDashboardViewController: UIViewController {
         updateStatusBar("职业：\(names)", isActive: false)
     }
 
+    @objc private func tapClassChip(_ sender: UIButton) {
+        tapClassChipAtIndex(sender.tag)
+    }
+
     private func updateClassChipStyles() {
-        for (index, button) in classChipButtons.enumerated() {
-            let selected = selectedClassIndexes.contains(index)
-            var cfg = UIButton.Configuration.filled()
-            cfg.title = classOptions[index].title
-            cfg.cornerStyle = .capsule
-            cfg.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14)
-            cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attr in
-                var out = attr
-                out.font = UIFont.systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-                return out
-            }
-            cfg.baseBackgroundColor = selected ? .systemBlue : .secondarySystemBackground
-            cfg.baseForegroundColor = selected ? .white : .label
-            button.configuration = cfg
+        // 通过 reconfigureItems 让 dataSource 重新调用 cellProvider 更新选中态
+        var snapshot = dataSource.snapshot()
+        let chipItems = snapshot.itemIdentifiers(inSection: .chips)
+        if !chipItems.isEmpty {
+            snapshot.reconfigureItems(chipItems)
+            dataSource.apply(snapshot, animatingDifferences: false)
         }
         compareButton.isEnabled = true
     }
@@ -1417,6 +1535,22 @@ final class DraftDashboardViewController: UIViewController {
         resultView.attributedText = attributed
     }
 
+    // 把 DraftCardDisplayModel 渲染到 CardChoiceCell（供 dataSource cellProvider 调用）
+    private func configureCardCell(_ cell: CardChoiceCell, with model: DraftCardDisplayModel) {
+        cell.cardView.onPreviewRequested = { [weak self] url in self?.presentCardPreview(imageURL: url) }
+        cell.cardView.configure(
+            name: model.name,
+            cardId: model.cardId,
+            metadata: model.metadataSummary,
+            hearthArenaScore: model.hearthArenaScore.map { formatNumber($0) },
+            classScores: model.hearthArenaClassScores.map { "\(localizedClassName($0.arenaClass)) \(formatNumber($0.score))" }.joined(separator: " / "),
+            hsReplaySummary: metricSummary(model.hsReplay, source: .hsReplay),
+            firestoneSummary: metricSummary(model.firestone, source: .firestone),
+            isRecommended: model.isRecommended
+        )
+        cell.cardView.setCardImageURL(cardImageURL(cardId: model.cardId))
+    }
+
     private func showDraftPreview(_ output: RenderedDraftOutput) {
         recommendationTitleLabel.text = output.recommendationTitle
         recommendationReasonLabel.text = output.recommendationReason
@@ -1425,35 +1559,15 @@ final class DraftDashboardViewController: UIViewController {
         currentRecommendationReason = output.recommendationReason
         currentCardDisplays = output.cardDisplays
 
-        let count = min(output.cardDisplays.count, cardChoiceViews.count)
-        for index in 0..<count {
-            let model = output.cardDisplays[index]
-            let cardView = cardChoiceViews[index]
-            cardView.isHidden = false
-            cardView.configure(
-                name: model.name,
-                cardId: model.cardId,
-                metadata: model.metadataSummary,
-                hearthArenaScore: model.hearthArenaScore.map { formatNumber($0) },
-                classScores: model.hearthArenaClassScores.map { "\(localizedClassName($0.arenaClass)) \(formatNumber($0.score))" }.joined(separator: " / "),
-                hsReplaySummary: metricSummary(model.hsReplay, source: .hsReplay),
-                firestoneSummary: metricSummary(model.firestone, source: .firestone),
-                isRecommended: model.isRecommended
-            )
-            cardView.setCardImageURL(cardImageURL(cardId: model.cardId))
-        }
-
         applySnapshot(animatingDifferences: true)
 
         // snapshot apply 是异步完成的，延一帧后滚动确保 layout 已更新
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.currentCardDisplays.isEmpty else { return }
-            let cardsIndexPath = IndexPath(item: 0, section: Section.cards.rawValue)
-            self.collectionView.scrollToItem(
-                at: cardsIndexPath,
-                at: .top,
-                animated: true
-            )
+            let sections = self.dataSource.snapshot().sectionIdentifiers
+            guard let cardsSectionIndex = sections.firstIndex(of: .cards) else { return }
+            let cardsIndexPath = IndexPath(item: 0, section: cardsSectionIndex)
+            self.collectionView.scrollToItem(at: cardsIndexPath, at: .top, animated: true)
         }
     }
 
@@ -1542,13 +1656,13 @@ final class DraftDashboardViewController: UIViewController {
         ].joined(separator: "\n")
     }
 
+    #if targetEnvironment(macCatalyst)
     private func handleLogEvent(_ event: DraftInputEvent) {
         let message = renderLogEvent(event)
         updateStatusBar("日志事件：\(localizedLogEventKind(event.kind))", isActive: true)
         appendResult("\n\n\(message)")
 
         if event.kind == .draftContinued || event.kind == .draftStarted || event.kind == .arenaStarted {
-            // 开启 60 秒选牌窗口期，自动截图监听会在此窗口内响应截图
             draftWindowExpiresAt = Date().addingTimeInterval(60)
             if isAutoWatching {
                 appendResult("\n下一步：日志已确认进入选牌流程，自动截图监听已就绪（60s 内有效）。请在炉石中截图。")
@@ -1558,6 +1672,7 @@ final class DraftDashboardViewController: UIViewController {
             }
         }
     }
+    #endif
 
     private func appendResult(_ text: String) {
         let existing = resultView.text ?? ""
@@ -1571,6 +1686,7 @@ final class DraftDashboardViewController: UIViewController {
         logStatusLabel.text = message
     }
 
+    #if targetEnvironment(macCatalyst)
     private func renderLogStatusSummary(_ status: HearthstoneLogStatus) -> String {
         guard let location = status.location else {
             return status.message
@@ -1651,6 +1767,7 @@ final class DraftDashboardViewController: UIViewController {
         case .rewards: "进入奖励页面"
         }
     }
+    #endif
 
     private func formatNumber(_ value: Double?) -> String {
         guard let value else {
@@ -1686,9 +1803,16 @@ final class DraftDashboardViewController: UIViewController {
         case .hearthArena:
             return "评分 \(formatNumber(metric.score))"
         case .hsReplay:
-            return "入牌胜率 \(formatPercent(metric.includedWinRate))\n抽到胜率 \(formatPercent(metric.drawnWinRate))\n样本 \(formatInt(metric.sampleSize))\(metric.hasReliableSample ? "" : " 低样本")"
+            var lines = [
+                "选取率 \(formatPercent(metric.pickRate))",
+                "入牌胜率 \(formatPercent(metric.includedWinRate))",
+                "抽到胜率 \(formatPercent(metric.drawnWinRate))",
+                "打出胜率 \(formatPercent(metric.playedWinRate))",
+                "样本 \(formatInt(metric.sampleSize))\(metric.hasReliableSample ? "" : "（低样本）")"
+            ]
+            return lines.joined(separator: "\n")
         case .firestone:
-            return "入牌胜率 \(formatPercent(metric.includedWinRate))\n样本 \(formatInt(metric.sampleSize))\(metric.hasReliableSample ? "" : " 低样本")"
+            return "入牌胜率 \(formatPercent(metric.includedWinRate))\n样本 \(formatInt(metric.sampleSize))\(metric.hasReliableSample ? "" : "（低样本）")"
         }
     }
 
@@ -1985,7 +2109,6 @@ private final class DraftCardChoiceView: UIView {
 
         imageContainer.snp.makeConstraints { make in
             make.top.leading.trailing.equalToSuperview()
-            // 炉石卡图比例约 0.718:1，裁为 1.1 倍宽高显示主体
             make.height.equalTo(imageContainer.snp.width).multipliedBy(1.1)
         }
         imageView.snp.makeConstraints { make in make.edges.equalToSuperview() }
@@ -1997,7 +2120,6 @@ private final class DraftCardChoiceView: UIView {
             make.top.trailing.equalToSuperview().inset(8)
         }
 
-        // 全部用纯 SnapKit 约束，不使用 UIStackView
         addSubview(nameLabel)
         addSubview(metadataLabel)
         addSubview(divider2)
@@ -2022,7 +2144,6 @@ private final class DraftCardChoiceView: UIView {
             make.leading.trailing.equalToSuperview().inset(pad)
             make.height.equalTo(1)
         }
-
         scoreTitleLabel.snp.makeConstraints { make in
             make.leading.equalToSuperview().inset(pad)
             make.lastBaseline.equalTo(scoreLabel.snp.lastBaseline)
@@ -2037,6 +2158,8 @@ private final class DraftCardChoiceView: UIView {
             make.leading.trailing.equalToSuperview().inset(pad)
         }
 
+        #if targetEnvironment(macCatalyst)
+        // Mac：HSReplay 和 Firestone 左右两列
         hsTitleLabel.snp.makeConstraints { make in
             make.top.equalTo(classScoreLabel.snp.bottom).offset(8)
             make.leading.equalToSuperview().inset(pad)
@@ -2058,13 +2181,32 @@ private final class DraftCardChoiceView: UIView {
             make.trailing.equalToSuperview().inset(pad)
             make.width.equalTo(hsReplayLabel)
         }
-        // cell 固定高度，内容不超出即可
         hsReplayLabel.snp.makeConstraints { make in
             make.bottom.lessThanOrEqualToSuperview().inset(pad)
         }
         firestoneLabel.snp.makeConstraints { make in
             make.bottom.lessThanOrEqualToSuperview().inset(pad)
         }
+        #else
+        // iOS：HSReplay 和 Firestone 垂直堆叠，充分利用宽屏
+        hsTitleLabel.snp.makeConstraints { make in
+            make.top.equalTo(classScoreLabel.snp.bottom).offset(8)
+            make.leading.equalToSuperview().inset(pad)
+        }
+        hsReplayLabel.snp.makeConstraints { make in
+            make.top.equalTo(hsTitleLabel.snp.bottom).offset(4)
+            make.leading.trailing.equalToSuperview().inset(pad)
+        }
+        fsTitleLabel.snp.makeConstraints { make in
+            make.top.equalTo(hsReplayLabel.snp.bottom).offset(10)
+            make.leading.equalToSuperview().inset(pad)
+        }
+        firestoneLabel.snp.makeConstraints { make in
+            make.top.equalTo(fsTitleLabel.snp.bottom).offset(4)
+            make.leading.trailing.equalToSuperview().inset(pad)
+            make.bottom.lessThanOrEqualToSuperview().inset(pad)
+        }
+        #endif
     }
 }
 
@@ -2101,20 +2243,93 @@ private final class StatusBarCell: HostingCollectionViewCell {
     static let reuseID = "StatusBarCell"
 }
 
-private final class ClassChipCell: HostingCollectionViewCell {
+/// Chip cell：内部持有自己的 UIButton，通过 configure() 直接更新，不依赖外部 button 实例复用。
+private final class ClassChipCell: UICollectionViewCell {
     static let reuseID = "ClassChipCell"
+
+    private let button = UIButton(type: .system)
+    var onTap: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        button.addTarget(self, action: #selector(didTap), for: .touchUpInside)
+        button.isUserInteractionEnabled = false // 点击透传到 cell
+        contentView.addSubview(button)
+        button.snp.makeConstraints { make in make.edges.equalToSuperview() }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(title: String, selected: Bool, onTap: @escaping () -> Void) {
+        self.onTap = onTap
+        var cfg = UIButton.Configuration.filled()
+        cfg.title = title
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14)
+        cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attr in
+            var out = attr; out.font = UIFont.systemFont(ofSize: 13, weight: selected ? .semibold : .regular); return out
+        }
+        cfg.baseBackgroundColor = selected ? .systemBlue : .secondarySystemBackground
+        cfg.baseForegroundColor = selected ? .white : .label
+        button.configuration = cfg
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        onTap?()
+    }
+
+    @objc private func didTap() { onTap?() }
 }
 
-private final class InputFieldCell: HostingCollectionViewCell {
+/// 输入框 cell：内部持有 UITextField，通过 configure() 更新，不依赖外部实例。
+private final class InputFieldCell: UICollectionViewCell, UITextFieldDelegate {
     static let reuseID = "InputFieldCell"
+    let textField = UITextField()
+    var onTextChange: ((String) -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        textField.borderStyle = .roundedRect
+        textField.autocorrectionType = .no
+        textField.autocapitalizationType = .none
+        textField.clearButtonMode = .whileEditing
+        textField.delegate = self
+        textField.addTarget(self, action: #selector(textChanged), for: .editingChanged)
+        contentView.addSubview(textField)
+        textField.snp.makeConstraints { make in make.edges.equalToSuperview() }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(placeholder: String, text: String, onTextChange: @escaping (String) -> Void) {
+        textField.placeholder = placeholder
+        textField.text = text
+        self.onTextChange = onTextChange
+    }
+
+    @objc private func textChanged() {
+        onTextChange?(textField.text ?? "")
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        textField.resignFirstResponder(); return true
+    }
 }
 
 private final class RecommendationCell: HostingCollectionViewCell {
     static let reuseID = "RecommendationCell"
 }
 
-private final class CardChoiceCell: HostingCollectionViewCell {
+/// 卡片 cell：内部持有自己的 DraftCardChoiceView，通过 configure() 更新，不依赖外部实例。
+private final class CardChoiceCell: UICollectionViewCell {
     static let reuseID = "CardChoiceCell"
+    let cardView = DraftCardChoiceView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.addSubview(cardView)
+        cardView.snp.makeConstraints { make in make.edges.equalToSuperview() }
+    }
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 private final class LogTextCell: HostingCollectionViewCell {
@@ -2223,6 +2438,7 @@ private final class CardImagePreviewViewController: UIViewController, UIGestureR
     }
 }
 
+#if targetEnvironment(macCatalyst)
 final class FolderPickerDelegate: NSObject, UIDocumentPickerDelegate {
     private let onPick: (URL) -> Void
 
@@ -2232,9 +2448,54 @@ final class FolderPickerDelegate: NSObject, UIDocumentPickerDelegate {
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
-        // 需要 security-scoped 访问才能持续读取沙盒外目录
         let accessing = url.startAccessingSecurityScopedResource()
         onPick(url)
         if accessing { url.stopAccessingSecurityScopedResource() }
     }
 }
+#endif
+
+// MARK: - iOS camera delegate
+
+#if !targetEnvironment(macCatalyst)
+extension DraftDashboardViewController: UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+    func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+        picker.dismiss(animated: true)
+        guard let image = info[.originalImage] as? UIImage else { return }
+        recognizeImage(image)
+    }
+
+    func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+        picker.dismiss(animated: true)
+        updateStatusBar("已取消拍照", isActive: false)
+    }
+}
+
+final class IOSPhotoPickerDelegate: NSObject, PHPickerViewControllerDelegate {
+    private let onPick: (UIImage) -> Void
+    private let onCancel: () -> Void
+
+    init(onPick: @escaping (UIImage) -> Void, onCancel: @escaping () -> Void) {
+        self.onPick = onPick
+        self.onCancel = onCancel
+    }
+
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: true)
+        guard let result = results.first else {
+            onCancel()
+            return
+        }
+        result.itemProvider.loadObject(ofClass: UIImage.self) { [weak self] object, _ in
+            let image = object as? UIImage
+            DispatchQueue.main.async {
+                if let image {
+                    self?.onPick(image)
+                } else {
+                    self?.onCancel()
+                }
+            }
+        }
+    }
+}
+#endif

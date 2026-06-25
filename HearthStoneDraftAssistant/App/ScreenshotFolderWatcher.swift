@@ -1,3 +1,4 @@
+#if targetEnvironment(macCatalyst)
 import Foundation
 
 struct ScreenshotWatcherStatus: Sendable, Equatable {
@@ -158,3 +159,4 @@ actor ScreenshotFolderWatcher {
         )
     }
 }
+#endif

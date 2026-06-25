@@ -1,5 +1,6 @@
 #import "OpenCVDraftImageMatcher.h"
 
+#if TARGET_OS_MACCATALYST
 #import <opencv2/opencv.hpp>
 
 static cv::Mat MatFromUIImage(UIImage *image);
@@ -162,3 +163,4 @@ static double ORBDistance(const cv::Mat &firstMat, const cv::Mat &secondMat) {
 }
 
 @end
+#endif

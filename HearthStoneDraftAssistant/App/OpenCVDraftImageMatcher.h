@@ -1,5 +1,7 @@
 #import <UIKit/UIKit.h>
 
+#if TARGET_OS_MACCATALYST
+
 NS_ASSUME_NONNULL_BEGIN
 
 @interface OpenCVDraftImageMatcher : NSObject
@@ -13,3 +15,5 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
+
+#endif

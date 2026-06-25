@@ -95,16 +95,35 @@ public actor DraftDataRepository {
     }
 
     public func aggregate(cardId: String, classContext: ArenaClass) -> CardAggregate {
-        let direct = metricsByClassAndCard[classContext]?[cardId] ?? [:]
-        let neutral = metricsByClassAndCard[.neutral]?[cardId] ?? [:]
+        // CORE_ 前缀 fallback：若原 ID 无数据，尝试去掉/加上 CORE_ 前缀
+        let lookupId = effectiveLookupId(for: cardId, classContext: classContext)
+        let direct = metricsByClassAndCard[classContext]?[lookupId] ?? [:]
+        let neutral = metricsByClassAndCard[.neutral]?[lookupId] ?? [:]
         let merged = neutral.merging(direct) { _, direct in direct }
         return CardAggregate(
             cardId: cardId,
-            metadata: cardsById[cardId],
+            metadata: cardsById[cardId] ?? cardsById[lookupId],
             hearthArena: merged[.hearthArena],
             hsReplay: merged[.hsReplay],
             firestone: merged[.firestone]
         )
+    }
+
+    // 若 cardId 在数据源里找不到，尝试 CORE_ 互转作为 fallback
+    private func effectiveLookupId(for cardId: String, classContext: ArenaClass) -> String {
+        if hasMetric(cardId, classContext: classContext) { return cardId }
+        let alt: String
+        if cardId.hasPrefix("CORE_") {
+            alt = String(cardId.dropFirst(5))
+        } else {
+            alt = "CORE_" + cardId
+        }
+        return hasMetric(alt, classContext: classContext) ? alt : cardId
+    }
+
+    private func hasMetric(_ cardId: String, classContext: ArenaClass) -> Bool {
+        (metricsByClassAndCard[classContext]?[cardId] != nil) ||
+        (metricsByClassAndCard[.neutral]?[cardId] != nil)
     }
 
     public func evaluateDraftChoices(
@@ -237,16 +256,17 @@ public actor DraftDataRepository {
     }
 
     private func candidateRank(_ cardId: String, classContext: ArenaClass) -> Double {
-        if let firestone = metricsByClassAndCard[classContext]?[cardId]?[.firestone]?.sampleSize {
+        let id = effectiveLookupId(for: cardId, classContext: classContext)
+        if let firestone = metricsByClassAndCard[classContext]?[id]?[.firestone]?.sampleSize {
             return 3_000_000 + Double(firestone)
         }
-        if let hsReplay = metricsByClassAndCard[classContext]?[cardId]?[.hsReplay]?.sampleSize {
+        if let hsReplay = metricsByClassAndCard[classContext]?[id]?[.hsReplay]?.sampleSize {
             return 2_000_000 + Double(hsReplay)
         }
-        if metricsByClassAndCard[classContext]?[cardId]?[.hearthArena] != nil {
+        if metricsByClassAndCard[classContext]?[id]?[.hearthArena] != nil {
             return 1_000_000
         }
-        if metricsByClassAndCard[.neutral]?[cardId]?[.hearthArena] != nil {
+        if metricsByClassAndCard[.neutral]?[id]?[.hearthArena] != nil {
             return 500_000
         }
         return 0

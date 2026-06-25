@@ -20,6 +20,10 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>拍摄炉石传说竞技场选牌界面截图，用于识别卡牌</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>从相册选取炉石传说竞技场选牌截图，用于识别卡牌</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
